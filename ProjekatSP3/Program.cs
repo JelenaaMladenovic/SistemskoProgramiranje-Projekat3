@@ -5,6 +5,7 @@
 //Prikazati dobijene rezultate.
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
@@ -15,7 +16,81 @@ using System.Threading.Tasks;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using SharpEntropy;
+using Microsoft.ML;
 
+
+#region LatentDirichletAllocation
+
+public class TextData
+{
+    public string Text { get; set; }
+}
+
+public class TransformedTextData : TextData
+{
+    public float[] Features { get; set; }
+}
+class LatentDirichletAllocation
+{
+    private static ConcurrentBag<string> _comments = new ConcurrentBag<string>();
+    private static int count = 0;
+    public static PredictionEngine<TextData, TransformedTextData> PredictionEngine { get; set; }
+
+    public static void ProccessData(ConcurrentBag<string> coms)
+    {
+        _comments.Clear();
+        _comments = coms;
+        count = _comments.Count;
+
+    }
+    public static void RunAnalysis(int topicNum)
+    {
+        var mlContext = new MLContext();
+
+        var samples = new List<TextData>();
+        for (int i = 0; i < count / 2; i++)
+        {
+            samples.Add(new TextData() { Text = _comments.ElementAt(i) });
+        }
+
+        var dataview = mlContext.Data.LoadFromEnumerable(samples);
+
+        var pipeline = mlContext.Transforms.Text.NormalizeText("NormalizedText",
+            "Text");
+            //.Append(mlContext.Transforms.Text.TokenizeIntoWords("Tokens",
+              //  "NormalizedText"))
+            //.Append(mlContext.Transforms.Text.RemoveDefaultStopWords("Tokens"))
+            //.Append(mlContext.Transforms.Conversion.MapValueToKey("Tokens"))
+           // .Append(mlContext.Transforms.Text.ProduceNgrams("Tokens"))
+           // .Append(mlContext.Transforms.Text.LatentDirichletAllocation(
+             // "Features", "Tokens", numberOfTopics: topicNum));
+
+        var transformer = pipeline.Fit(dataview);
+
+        var predictionEngine = mlContext.Model.CreatePredictionEngine<TextData,
+            TransformedTextData>(transformer);
+        PredictionEngine = predictionEngine;
+    }
+    public static string GetPrediction(string text)
+    {
+        var prediction = PredictionEngine.Predict(new TextData() { Text = text });
+        return PrintLdaFeatures(prediction);
+    }
+
+    private static string PrintLdaFeatures(TransformedTextData prediction)
+    {
+        string result = "";
+        for (int i = 0; i < prediction.Features.Length; i++)
+        {
+            Console.Write($"{prediction.Features[i]:F4}  ");
+            result += $"{prediction.Features[i]:F4}  ";
+        }
+        result += "\n";
+        Console.WriteLine();
+        return result;
+    }
+}
+#endregion
 
 public class Gym
 {
@@ -89,6 +164,11 @@ public class GymStream : IObservable<Gym>
 public class GymObserver : IObserver<Gym>
 {
     private readonly string name;
+    private ConcurrentBag<Task> _tasks = new ConcurrentBag<Task>();
+    private ConcurrentBag<string> _comments = new ConcurrentBag<string>();
+    
+    private ISubject<string> _subject;
+    private object _lock = new object();
     public GymObserver(string name)
     {
         this.name = name;
@@ -104,6 +184,34 @@ public class GymObserver : IObserver<Gym>
     public void OnCompleted()
     {
         Console.WriteLine($"{name}: Uspesno vraceni svi komentari.");
+        DoTopicModeling();
+    }
+
+
+    private void DoTopicModeling()
+    {
+        try
+        {
+            Console.WriteLine($"Topic modeling for {name}:\n");
+            LatentDirichletAllocation.ProccessData(_comments);
+            LatentDirichletAllocation.RunAnalysis(4);
+
+            foreach (var comment in _comments)
+            {
+                string topic = LatentDirichletAllocation.GetPrediction(comment);
+                _subject.OnNext(topic);
+            }
+        }
+        catch (Exception e)
+        {
+            lock (_lock)
+            {
+                Console.WriteLine(e.Message + "in analysis");
+                _subject.OnError(e);
+            }
+        }
+        _subject.OnCompleted();
+
     }
 }
 
